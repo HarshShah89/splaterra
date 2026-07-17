@@ -257,7 +257,8 @@ def _colmap_params_to_K(model, params):
 # ---------------------------------------------------------------------------
 
 def load_colmap_scene(dataset_path, images_dir="images", sparse_subdir="sparse/0",
-                       device="cuda", resolution_scale=1.0):
+                       device="cuda", resolution_scale=1.0,
+                       eval=False, llffhold=8):
     """
     dataset_path : folder containing `sparse/0/` and the images dir
     images_dir   : name of the folder with the actual photos (relative to dataset_path)
@@ -314,12 +315,16 @@ def load_colmap_scene(dataset_path, images_dir="images", sparse_subdir="sparse/0
             K[0, 2] *= resolution_scale
             K[1, 2] *= resolution_scale
 
+        # ... inside load_colmap_scene ...
         image_path = os.path.join(dataset_path, images_dir, img.name)
         pil_image = PILImage.open(image_path).convert("RGB")
-        if resolution_scale != 1.0:
+
+# Force the resize to match COLMAP's recorded width/height
+        if pil_image.size != (width, height):
             pil_image = pil_image.resize((width, height), PILImage.LANCZOS)
 
         image_tensor = torch.from_numpy(np.array(pil_image)).float().permute(2, 0, 1) / 255.0
+# ...
         image_tensor = image_tensor.to(device)
 
         cam = TinySplatCamera(
@@ -330,6 +335,16 @@ def load_colmap_scene(dataset_path, images_dir="images", sparse_subdir="sparse/0
             original_image=image_tensor,
             image_name=img.name,
         )
+        
         cameras.append(cam)
 
-    return points, point_colors, cameras
+    if eval:
+        train_cameras = [c for idx, c in enumerate(cameras) if idx % llffhold != 0]
+        test_cameras  = [c for idx, c in enumerate(cameras) if idx % llffhold == 0]
+    else:
+        train_cameras = cameras
+        test_cameras = []
+
+    return points, point_colors, train_cameras, test_cameras
+
+   
