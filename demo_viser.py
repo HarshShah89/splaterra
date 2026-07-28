@@ -10,6 +10,7 @@ import shutil
 import yaml
 import torch
 import cv2
+import wandb
 from PIL import Image
 from torchvision import transforms
 from natsort import natsorted
@@ -127,6 +128,9 @@ parser.add_argument("--warmup", action="store_true", help="Run a warmup inferenc
 parser.add_argument("--benchmark", action="store_true", help="Run multiple inference passes and report timing statistics.")
 parser.add_argument("--load_to_cpu", action="store_true", default=True, help="Keep the preloaded image tensor on CPU (default; avoids GPU OOM on long sequences).")
 parser.add_argument("--no_load_to_cpu", action="store_false", dest='load_to_cpu', help="Move the preloaded image tensor onto the GPU before inference.")
+
+
+
 
 def load_pi3_model(model_name: str, config_path: Optional[str] = None, pi3x: bool = False, pi3x_metric: bool = True):
     """Initializes the Pi3 model and loads weights."""
@@ -405,6 +409,26 @@ def main():
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
+    wandb.init(
+    project="LoGeR-Ablations",
+    group=args.exp_name,          # e.g. "window_size"
+    name=args.run_name,           # e.g. "window24"
+    config={
+        "window_size": args.window_size,
+        "overlap_size": args.overlap_size,
+        "ttt_reset": args.ttt_reset,
+        "use_ttt": args.use_ttt,
+        "use_swa": args.use_swa,
+        "sim3_mode": args.sim3_mode,
+        "frame_stride": args.frame_stride,
+        "resolution": args.image_size,
+        "revisit_state": args.revisit_state,
+        "solve_pose": args.solve_pose,
+        "detach": args.detach,
+        "adaptive_features": args.adaptive_features,
+        "adaptive_metric_scaling": args.metric_scaling,
+    }
+)
 
     # Fail fast for local LoGeR checkpoints/configs when files are missing.
     if args.config and not os.path.isfile(args.config):
@@ -512,6 +536,9 @@ def main():
         print("Running inference...")
         dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability(device)[0] >= 8 else torch.float16
         num_frames = images_tensor.shape[0]
+        wandb.log({
+        "num_frames": num_frames
+        })
         
         forward_kwargs = {}
         if args.config:
@@ -535,6 +562,7 @@ def main():
                     'turn_off_swa': args.no_swa,
                 })
                 print(f"Forward pass kwargs from config: {forward_kwargs}")
+                wandb.config.update(forward_kwargs)
 
             except Exception as e:
                 print(f"Could not read config for forward pass arguments: {e}")
@@ -576,6 +604,10 @@ def main():
                     torch.cuda.synchronize()
                 t_end = time.time()
                 inference_times.append(t_end - t_start)
+                wandb.log({
+                "benchmark/run": run_idx,
+                "benchmark/time": t_end - t_start,
+                })
                 print(f"  Run {run_idx + 1}/{num_runs}: {t_end - t_start:.3f}s")
             
             avg_time = sum(inference_times) / len(inference_times)
@@ -596,6 +628,8 @@ def main():
             # Single timed inference
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
+                
+                torch.cuda.reset_peak_memory_stats()
             inference_start_time = time.time()
             
             with torch.no_grad(), torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=dtype):
@@ -618,6 +652,16 @@ def main():
             if not args.warmup:
                 print(f"  (Note: First run includes torch.compile overhead. Use --warmup for accurate timing)")
             print(f"{'='*50}\n")
+            peak_mem_mb = 0
+    if torch.cuda.is_available():
+        peak_mem_mb = torch.cuda.max_memory_allocated() / (1024**2)
+
+    wandb.log({
+        "time_s": inference_time,
+        "fps": fps,
+        "ms_per_frame": ms_per_frame,
+        "peak_mem_mb": peak_mem_mb,
+    })
 
         # Post-process predictions
         # Using permute to get (B, S, H, W, C) for easier numpy conversion later
@@ -748,6 +792,6 @@ def main():
             shutil.rmtree(temp_dir_path)
 
     print("Visualization setup complete. Server is running.")
-
+    wandb.finish()
 if __name__ == "__main__":
     main()
