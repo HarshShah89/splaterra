@@ -41,7 +41,7 @@ def extract_frames_from_video(video_path, output_dir, start_frame, end_frame, st
     saved_frame_count = 0
     image_paths = []
 
-    actual_end_frame = total_frames -1 if end_frame == -1 else end_frame
+    actual_end_frame = total_frames - 1 if end_frame == -1 else end_frame
     if actual_end_frame >= total_frames:
         print(f"Warning: end_frame ({actual_end_frame}) is beyond total frames ({total_frames-1}). Adjusting to last frame.")
         actual_end_frame = total_frames - 1
@@ -59,7 +59,7 @@ def extract_frames_from_video(video_path, output_dir, start_frame, end_frame, st
             cv2.imwrite(frame_path, frame)
             image_paths.append(frame_path)
             saved_frame_count += 1
-        
+
         current_frame_idx += 1
 
     cap.release()
@@ -129,7 +129,17 @@ parser.add_argument("--benchmark", action="store_true", help="Run multiple infer
 parser.add_argument("--load_to_cpu", action="store_true", default=True, help="Keep the preloaded image tensor on CPU (default; avoids GPU OOM on long sequences).")
 parser.add_argument("--no_load_to_cpu", action="store_false", dest='load_to_cpu', help="Move the preloaded image tensor onto the GPU before inference.")
 
-
+# --- wandb / ablation-tracking arguments ---
+parser.add_argument("--wandb", action="store_true", default=True, help="Enable Weights & Biases logging (default: True).")
+parser.add_argument("--no_wandb", action="store_false", dest="wandb", help="Disable Weights & Biases logging.")
+parser.add_argument("--wandb_project", type=str, default="LoGeR-Ablations", help="wandb project name.")
+parser.add_argument("--exp_name", type=str, default="default_exp", help="wandb group name, e.g. 'window_size'.")
+parser.add_argument("--run_name", type=str, default=None, help="wandb run name, e.g. 'window24'. Defaults to seq_name if omitted.")
+parser.add_argument("--revisit_state", action="store_true", help="[ablation flag] Revisit/reuse state across windows.")
+parser.add_argument("--solve_pose", action="store_true", help="[ablation flag] Solve for camera pose explicitly.")
+parser.add_argument("--detach", action="store_true", help="[ablation flag] Detach gradients/state between windows.")
+parser.add_argument("--adaptive_features", action="store_true", help="[ablation flag] Use adaptive feature selection.")
+parser.add_argument("--metric_scaling", action="store_true", help="[ablation flag] Use adaptive metric scaling.")
 
 
 def load_pi3_model(model_name: str, config_path: Optional[str] = None, pi3x: bool = False, pi3x_metric: bool = True):
@@ -142,7 +152,7 @@ def load_pi3_model(model_name: str, config_path: Optional[str] = None, pi3x: boo
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
-            
+
             model_config = config.get('model', {})
             pi3_signature = inspect.signature(Pi3.__init__)
             valid_kwargs = {
@@ -187,7 +197,6 @@ def load_pi3_model(model_name: str, config_path: Optional[str] = None, pi3x: boo
             print("Switching default model to yyfz233/Pi3X because --pi3x is set.")
             model_name = "yyfz233/Pi3X"
 
-
     try:
         # Initialize model with parameters from config
         model = Pi3(**model_kwargs)
@@ -197,7 +206,7 @@ def load_pi3_model(model_name: str, config_path: Optional[str] = None, pi3x: boo
             model = model.from_pretrained(model_name, strict=False if pi3x else True, **model_kwargs)
             print("Model loaded successfully from Hugging Face Hub.")
             return model
-        
+
         # Load pre-trained weights
         print(f"Loading pre-trained weights from: {model_name}")
         # Use strict=False to allow for architecture mismatches when loading weights
@@ -216,14 +225,14 @@ def load_pi3_model(model_name: str, config_path: Optional[str] = None, pi3x: boo
                 new_state_dict[k[7:]] = v  # remove `module.`
             else:
                 new_state_dict[k] = v
-        
+
         model.load_state_dict(new_state_dict, strict=True)
-        
+
         print("Model loaded successfully.")
     except Exception as e:
         print(f"Could not load model. Error: {e}")
         return None
-        
+
     return model
 
 
@@ -241,16 +250,16 @@ def run_core_inference(
     """
     model_obj.eval()
     model_obj = model_obj.to(device)
-    
+
     temp_frame_dirs = {}
     input_indices = {}
     all_image_names = []
-    
+
     for i, input_path in enumerate(input_paths):
         input_key = f"input{i+1}"
         if i > 0:
             input_indices[f"cam{i:02d}"] = len(all_image_names)
-        
+
         if is_video_file(input_path):
             temp_dir = tempfile.mkdtemp(prefix=f"pi3_frames_{input_key}_")
             temp_frame_dirs[input_key] = temp_dir
@@ -274,20 +283,20 @@ def run_core_inference(
     if not all_image_names:
         print("Error: No images found from any input.")
         return None, [], {}, {}
-        
+
     print(f"Loading images from combined inputs ({len(all_image_names)} images found)...")
     # Use load_images_from_paths to load exactly the images we collected
     images_tensor = load_images_from_paths(all_image_names, Target_W=target_resolution[0], Target_H=target_resolution[1]).to(device)
     print(f"Preprocessed images tensor shape: {images_tensor.shape}")
 
-    print("Running inference...")    
+    print("Running inference...")
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability(device)[0] >= 8 else torch.float16
 
     with torch.no_grad(), torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=dtype):
-        raw_model_predictions = model_obj(images_tensor[None]) # Add batch dimension
-    
+        raw_model_predictions = model_obj(images_tensor[None])  # Add batch dimension
+
     # Post-process predictions
-    raw_model_predictions['images'] = images_tensor[None].permute(0, 1, 3, 4, 2) # B, S, H, W, C
+    raw_model_predictions['images'] = images_tensor[None].permute(0, 1, 3, 4, 2)  # B, S, H, W, C
     raw_model_predictions['conf'] = torch.sigmoid(raw_model_predictions['conf'])
     edge = depth_edge(raw_model_predictions['local_points'][..., 2], rtol=0.03)
     raw_model_predictions['conf'][edge] = 0.0
@@ -306,7 +315,7 @@ def _try_load_timestamps_for_images(image_paths, input_rgb_dir: Path):
     3) Fallback to sequential indices starting at 0
     """
     # 1) TUM-format rgb.txt in the parent directory
-    if input_rgb_dir.is_file(): # if input is a video file
+    if input_rgb_dir.is_file():  # if input is a video file
         return [float(i) for i in range(len(image_paths))]
 
     rgb_txt_path = input_rgb_dir.parent / "rgb.txt"
@@ -405,30 +414,11 @@ def load_images_from_paths(image_paths, PIXEL_LIMIT=255000, Target_W=None, Targe
         return torch.empty(0)
     return out[:valid] if valid < len(image_paths) else out
 
+
 def main():
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
-    wandb.init(
-    project="LoGeR-Ablations",
-    group=args.exp_name,          # e.g. "window_size"
-    name=args.run_name,           # e.g. "window24"
-    config={
-        "window_size": args.window_size,
-        "overlap_size": args.overlap_size,
-        "ttt_reset": args.ttt_reset,
-        "use_ttt": args.use_ttt,
-        "use_swa": args.use_swa,
-        "sim3_mode": args.sim3_mode,
-        "frame_stride": args.frame_stride,
-        "resolution": args.image_size,
-        "revisit_state": args.revisit_state,
-        "solve_pose": args.solve_pose,
-        "detach": args.detach,
-        "adaptive_features": args.adaptive_features,
-        "adaptive_metric_scaling": args.metric_scaling,
-    }
-)
 
     # Fail fast for local LoGeR checkpoints/configs when files are missing.
     if args.config and not os.path.isfile(args.config):
@@ -441,7 +431,7 @@ def main():
     input_indices = {}
     image_folder_for_sky = None
     target_resolution = args.resolution if args.resolution and len(args.resolution) == 2 else None
-    
+
     # Generate seq_name automatically if not provided, similar to demo_viser.py
     if args.seq_name is None:
         args.seq_name = os.path.basename(os.path.dirname(args.input)) + "_" + os.path.basename(args.input)
@@ -453,7 +443,30 @@ def main():
             args.seq_name += f"_{os.path.basename(os.path.dirname(args.input4))}_{os.path.basename(args.input4)}"
         if args.input5:
             args.seq_name += f"_{os.path.basename(os.path.dirname(args.input5))}_{os.path.basename(args.input5)}"
-    
+
+    # --- wandb init (after seq_name is resolved, so run_name can default to it) ---
+    if args.wandb:
+        wandb.init(
+            project=args.wandb_project,
+            group=args.exp_name,
+            name=args.run_name or args.seq_name,
+            config={
+                "window_size": args.window_size,
+                "overlap_size": args.overlap_size,
+                "ttt_reset": args.reset_every,
+                "use_ttt": not args.no_ttt,
+                "use_swa": not args.no_swa,
+                "sim3_mode": args.sim3_scale_mode,
+                "frame_stride": args.stride,
+                "resolution": args.resolution,
+                "revisit_state": args.revisit_state,
+                "solve_pose": args.solve_pose,
+                "detach": args.detach,
+                "adaptive_features": args.adaptive_features,
+                "adaptive_metric_scaling": args.metric_scaling,
+            }
+        )
+
     if args.load:
         saved_predictions_path = args.load
         if os.path.isdir(saved_predictions_path):
@@ -461,7 +474,7 @@ def main():
                 saved_predictions_path = os.path.join(saved_predictions_path, f"{args.seq_name}.pt")
             else:
                 saved_predictions_path = os.path.join(saved_predictions_path, "predictions.pt")
-        
+
         if os.path.exists(saved_predictions_path):
             print(f"Loading pre-computed results from {saved_predictions_path}...")
             try:
@@ -475,10 +488,10 @@ def main():
                         for subkey, subvalue in value.items():
                             if isinstance(subvalue, torch.Tensor):
                                 predictions_dict[key][subkey] = subvalue.numpy()
-                image_folder_for_sky = args.input # Assume first input is the reference for sky mask
+                image_folder_for_sky = args.input  # Assume first input is the reference for sky mask
             except Exception as e:
                 print(f"Error loading {saved_predictions_path}: {e}. Proceeding with inference.")
-                predictions_dict = None 
+                predictions_dict = None
         else:
             print(f"No pre-computed results found at {saved_predictions_path}. Proceeding with inference.")
 
@@ -490,14 +503,13 @@ def main():
 
         # Move model to device early
         model = model.to(device)
-        #model.eval()
         model = model.eval()
 
         input_paths = [p for p in [args.input, args.input2, args.input3, args.input4, args.input5] if p is not None]
-        
+
         all_image_names_collected = []
         input_indices = {}
-        
+
         for i, input_path in enumerate(input_paths):
             if i > 0: input_indices[f"cam{i:02d}"] = len(all_image_names_collected)
 
@@ -514,11 +526,11 @@ def main():
                 end_idx = args.end_frame if args.end_frame != -1 else None
                 current_frames = current_frames[args.start_frame:end_idx:args.stride]
                 all_image_names_collected.extend(current_frames)
-        
+
         if not all_image_names_collected:
             print("No images to process. Exiting.")
             return
-            
+
         print(f"Found {len(all_image_names_collected)} images to process.")
         if target_resolution is not None:
             images_tensor = load_images_from_paths(all_image_names_collected, Target_W=target_resolution[0], Target_H=target_resolution[1])
@@ -536,10 +548,9 @@ def main():
         print("Running inference...")
         dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability(device)[0] >= 8 else torch.float16
         num_frames = images_tensor.shape[0]
-        wandb.log({
-        "num_frames": num_frames
-        })
-        
+        if args.wandb:
+            wandb.log({"num_frames": num_frames})
+
         forward_kwargs = {}
         if args.config:
             try:
@@ -554,7 +565,7 @@ def main():
                     'window_size': args.window_size if args.window_size is not None else training_settings.get('window_size', -1),
                     'overlap_size': args.overlap_size if args.overlap_size is not None else training_settings.get('overlap_size', 0),
                     'reset_every': args.reset_every if args.reset_every is not None else training_settings.get('reset_every', 0),
-                    'num_iterations': config.get('num_iterations', 1), # Or from training_settings
+                    'num_iterations': config.get('num_iterations', 1),  # Or from training_settings
                     'sim3': config.get('sim3', False) or args.sim3,
                     'sim3_scale_mode': args.sim3_scale_mode,
                     'se3': se3_value,
@@ -562,14 +573,13 @@ def main():
                     'turn_off_swa': args.no_swa,
                 })
                 print(f"Forward pass kwargs from config: {forward_kwargs}")
-                wandb.config.update(forward_kwargs)
+                if args.wandb:
+                    wandb.config.update(forward_kwargs, allow_val_change=True)
 
             except Exception as e:
                 print(f"Could not read config for forward pass arguments: {e}")
         elif args.window_size or args.overlap_size or args.sim3 or args.reset_every is not None:
             forward_kwargs.update({
-                'window_size': args.window_size,
-                'overlap_size': args.overlap_size,
                 'window_size': args.window_size,
                 'overlap_size': args.overlap_size,
                 'sim3': args.sim3,
@@ -604,17 +614,18 @@ def main():
                     torch.cuda.synchronize()
                 t_end = time.time()
                 inference_times.append(t_end - t_start)
-                wandb.log({
-                "benchmark/run": run_idx,
-                "benchmark/time": t_end - t_start,
-                })
+                if args.wandb:
+                    wandb.log({
+                        "benchmark/run": run_idx,
+                        "benchmark/time": t_end - t_start,
+                    })
                 print(f"  Run {run_idx + 1}/{num_runs}: {t_end - t_start:.3f}s")
-            
+
             avg_time = sum(inference_times) / len(inference_times)
             min_time = min(inference_times)
             max_time = max(inference_times)
             std_time = (sum((t - avg_time) ** 2 for t in inference_times) / len(inference_times)) ** 0.5
-            
+
             print(f"\n{'='*50}")
             print(f"Benchmark Results ({num_runs} runs):")
             print(f"  Total frames: {num_frames}")
@@ -624,21 +635,22 @@ def main():
             print(f"  Avg time per frame: {(avg_time / num_frames) * 1000:.2f} ms")
             print(f"{'='*50}\n")
             inference_time = avg_time
+            fps = num_frames / avg_time
+            ms_per_frame = (avg_time / num_frames) * 1000
         else:
             # Single timed inference
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-                
                 torch.cuda.reset_peak_memory_stats()
             inference_start_time = time.time()
-            
+
             with torch.no_grad(), torch.cuda.amp.autocast(enabled=torch.cuda.is_available(), dtype=dtype):
-                raw_model_predictions = model(images_tensor[None], **forward_kwargs) # Add batch dimension
+                raw_model_predictions = model(images_tensor[None], **forward_kwargs)  # Add batch dimension
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             inference_end_time = time.time()
-            
+
             # Calculate and display timing
             inference_time = inference_end_time - inference_start_time
             fps = num_frames / inference_time
@@ -652,16 +664,19 @@ def main():
             if not args.warmup:
                 print(f"  (Note: First run includes torch.compile overhead. Use --warmup for accurate timing)")
             print(f"{'='*50}\n")
-            peak_mem_mb = 0
-    if torch.cuda.is_available():
-        peak_mem_mb = torch.cuda.max_memory_allocated() / (1024**2)
 
-    wandb.log({
-        "time_s": inference_time,
-        "fps": fps,
-        "ms_per_frame": ms_per_frame,
-        "peak_mem_mb": peak_mem_mb,
-    })
+        # peak_mem_mb applies to both benchmark and single-run paths
+        peak_mem_mb = 0
+        if torch.cuda.is_available():
+            peak_mem_mb = torch.cuda.max_memory_allocated() / (1024**2)
+
+        if args.wandb:
+            wandb.log({
+                "time_s": inference_time,
+                "fps": fps,
+                "ms_per_frame": ms_per_frame,
+                "peak_mem_mb": peak_mem_mb,
+            })
 
         # Post-process predictions
         # Using permute to get (B, S, H, W, C) for easier numpy conversion later
@@ -675,27 +690,27 @@ def main():
 
         # Convert all tensors to numpy and remove batch dimension
         # Filter out non-tensor values (e.g., window_ttt_losses which is a list)
-        predictions_dict = {k: v.squeeze(0).cpu().float().numpy() 
-                           for k, v in raw_model_predictions.items() 
+        predictions_dict = {k: v.squeeze(0).cpu().float().numpy()
+                           for k, v in raw_model_predictions.items()
                            if v is not None and torch.is_tensor(v)}
 
         if args.output_folder:
             os.makedirs(args.output_folder, exist_ok=True)
             # Use the same naming convention as demo_viser.py
             seq_name_to_use = f"{args.seq_name}_{str(args.start_frame)}_{str(args.end_frame)}_{str(args.stride)}"
-            
+
             # Count number of inputs processed
             input_paths = [p for p in [args.input, args.input2, args.input3, args.input4, args.input5] if p is not None]
             num_inputs_processed = len(input_paths)
             if num_inputs_processed > 1:
                 seq_name_to_use += f"_x{num_inputs_processed}"
-            
+
             output_filename = f"{seq_name_to_use}.pt" if seq_name_to_use else "predictions.pt"
             output_path = os.path.join(args.output_folder, output_filename)
             print(f"Saving inference results to {output_path}...")
             try:
                 # Save the numpy dict. For consistency, can convert back to tensors for saving.
-                torch.save({k: torch.from_numpy(v) for k,v in predictions_dict.items()}, output_path)
+                torch.save({k: torch.from_numpy(v) for k, v in predictions_dict.items()}, output_path)
                 print("Successfully saved inference results.")
             except Exception as e:
                 print(f"Error saving results to {output_path}: {e}")
@@ -703,58 +718,32 @@ def main():
     if args.output_txt and predictions_dict is not None and "camera_poses" in predictions_dict:
         print(f"Saving trajectory to {args.output_txt}...")
         try:
-            # 1) Prepare timestamps
-            # We use the first input path to try finding timestamps
             input_path_for_ts = Path(args.input)
-            # If we have multiple inputs, we might need to be careful, but usually we evaluate on the first sequence or combined.
-            # Here we use all_image_names_collected which corresponds to the inference frames.
-            # Note: all_image_names_collected might be temp paths if we copied them.
-            # If we copied them, we lost the original path connection for timestamp lookup if we rely on temp dir.
-            # However, _try_load_timestamps_for_images uses input_rgb_dir to find rgb.txt.
-            # If we pass the original input path as input_rgb_dir, it might work if filenames match.
-            # But filenames in temp dir are frame_xxxxxx.png.
-            # So we should probably use the original filenames if possible, or just fallback to indices if using temp dir.
-            
-            # If we used temp dir (which we did for combined inputs), filenames are frame_000000.png.
-            # This breaks mapping to rgb.txt which uses original filenames.
-            # So for now, if we used temp dir, we might have to fallback to indices unless we tracked original names.
-            # In run_core_inference or main, we didn't track original names in a way that maps easily back for rgb.txt lookup 
-            # unless we parse them.
-            
-            # However, if args.input is a directory and we are just processing it (and maybe others), 
-            # and if we want to evaluate, we usually care about the timestamps of the frames we processed.
-            
-            # Let's try to use indices as timestamps if we can't easily map back, 
-            # OR if the user provided a single input folder, we can try to be smarter.
-            
-            timestamps = None
-            if len(input_paths) == 1 and os.path.isdir(args.input) and not is_video_file(args.input):
-                 # If single folder input, we can try to load timestamps using the original filenames
-                 # Re-glob to get original paths
-                 # import glob # Already imported globally
-                 # from natsort import natsorted # Already imported globally
-                 current_frames = natsorted(glob.glob(os.path.join(args.input, "*.png"))+glob.glob(os.path.join(args.input, "*.jpg"))+glob.glob(os.path.join(args.input, "*.jpeg")))
-                 current_frames = [f for f in current_frames if "depth" not in os.path.basename(f).lower()]
-                 end_idx = args.end_frame if args.end_frame != -1 else None
-                 current_frames = current_frames[args.start_frame:end_idx:args.stride]
-                 
-                 timestamps = _try_load_timestamps_for_images(current_frames, Path(args.input))
-            else:
-                 # Fallback to indices
-                 timestamps = [float(i) for i in range(len(all_image_names_collected))]
 
-            # 2) Extract poses
-            # predictions_dict['camera_poses'] is (N, 4, 4) numpy array
+            timestamps = None
+            input_paths_for_ts_check = [p for p in [args.input, args.input2, args.input3, args.input4, args.input5] if p is not None]
+            if len(input_paths_for_ts_check) == 1 and os.path.isdir(args.input) and not is_video_file(args.input):
+                current_frames = natsorted(glob.glob(os.path.join(args.input, "*.png"))+glob.glob(os.path.join(args.input, "*.jpg"))+glob.glob(os.path.join(args.input, "*.jpeg")))
+                current_frames = [f for f in current_frames if "depth" not in os.path.basename(f).lower()]
+                end_idx = args.end_frame if args.end_frame != -1 else None
+                current_frames = current_frames[args.start_frame:end_idx:args.stride]
+
+                timestamps = _try_load_timestamps_for_images(current_frames, Path(args.input))
+            else:
+                # Fallback to indices
+                num_ts = predictions_dict['camera_poses'].shape[0]
+                timestamps = [float(i) for i in range(num_ts)]
+
+            # Extract poses
             camera_poses = torch.from_numpy(predictions_dict['camera_poses'])
-            
+
             # Pi3 outputs Twc (Camera to World) directly
             Twc = camera_poses
             Rwc = Twc[..., :3, :3]
             twc = Twc[..., :3, 3]
-            
-            qwc = mat_to_quat(Rwc) # XYZW
-            
-            # 3) Write
+
+            qwc = mat_to_quat(Rwc)  # XYZW
+
             # Ensure lengths match
             S = min(len(timestamps), twc.shape[0], qwc.shape[0])
             write_trajectory_txt(Path(args.output_txt), timestamps[:S], twc[:S].tolist(), qwc[:S].tolist())
@@ -766,32 +755,39 @@ def main():
         print("Error: Predictions are not available. Exiting.")
         for temp_dir_path in temp_frame_dirs.values():
             if os.path.exists(temp_dir_path): shutil.rmtree(temp_dir_path)
+        if args.wandb:
+            wandb.finish()
         return
 
     if args.skip_viser:
         print("Skipping viser visualization.")
+        if args.wandb:
+            wandb.finish()
         return
 
     print("Starting viser visualization...")
     viser_wrapper(
-        predictions_dict, 
+        predictions_dict,
         port=args.port,
         init_conf_threshold=args.conf_threshold,
         background_mode=args.background_mode,
         mask_sky=args.mask_sky,
-        image_folder_for_sky_mask=image_folder_for_sky, 
+        image_folder_for_sky_mask=image_folder_for_sky,
         subsample=args.subsample,
         video_width=args.video_width,
         share=args.share,
         canonical_first_frame=args.canonical_first_frame,
     )
-    
+
     for temp_dir_path in temp_frame_dirs.values():
         if os.path.exists(temp_dir_path):
             print(f"Cleaning up temporary directory: {temp_dir_path}")
             shutil.rmtree(temp_dir_path)
 
     print("Visualization setup complete. Server is running.")
-    wandb.finish()
+    if args.wandb:
+        wandb.finish()
+
+
 if __name__ == "__main__":
     main()
