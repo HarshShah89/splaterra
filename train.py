@@ -19,7 +19,7 @@ from tinysplat.colmap_loader import load_colmap_scene
 pipe = PipelineParams()
 opt = OptimizationParams()
 dataset = ModelParams()
-dataset.source_path = "/home/junior/splaterra/splaterra/tinysplat"
+dataset.source_path = "/home/junior/splaterra/tinysplat"
 wandb.init(
     project="3dgs-training",
     name=os.path.basename(dataset.source_path.rstrip("/")),
@@ -255,7 +255,7 @@ for iteration in range(first_iteration, opt.iterations + 1):
             gaussians.exposure_optimizer.zero_grad(set_to_none=True)
  
     # Checkpoints
-    if iteration % 100 == 0:
+    if iteration % 6000 == 0:
         print(f"\n[ITER {iteration}] Saving checkpoint")
  
         torch.save({

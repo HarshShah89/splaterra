@@ -6,3 +6,4 @@ tinysplat/checkpoints
 tinysplat/input
 tinysplat/output
 tinysplat/checkpoint_ply
+wandb
