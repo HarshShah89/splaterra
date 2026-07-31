@@ -31,12 +31,12 @@ for ckpt_name in "${ckpt_list[@]}"; do
         --config "$config_path" \
         --model_name "$model_path" \
         --start_frame 0 \
-        --end_frame 50 \
+        --end_frame 519 \
         --stride 1 \
-        --window_size 32 \
-        --overlap_size 3 \
+        --window_size 50 \
+        --overlap_size 5 \
         --subsample 2 \
-        --share \
+        
         # --reset_every 5  # turned on for extreme long sequences (>1k frames)
 
 
