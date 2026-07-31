@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import argparse
 import warnings
-
+import wandb
 from copy import deepcopy
 from eval.relpose.metadata import dataset_metadata
 from eval.relpose.utils import *
@@ -410,8 +410,9 @@ def eval_pose_estimation_dist(args, img_path, save_dir=None, mask_path=None):
                 )
                 end = time.time()
                 fps = len(filelist) / max(end - start, 1e-6)
-                print(f"Finished pose estimation for {args.eval_dataset} {seq: <16}, FPS: {fps:.2f}")
+                
 
+                print(f"Finished pose estimation for {args.eval_dataset} {seq:<16}, FPS: {fps:.2f}")
                 (
                     colors,
                     pts3ds_self,
@@ -461,7 +462,16 @@ def eval_pose_estimation_dist(args, img_path, save_dir=None, mask_path=None):
                     )
                 else:
                     ate, rpe_trans, rpe_rot = 0, 0, 0
+                    
                     bug = True
+                
+                wandb.log({
+                    "sequence": seq,
+                    "ATE": ate,
+                    "RPE_translation": rpe_trans,
+                    "RPE_rotation_deg": rpe_rot,
+                    "FPS": fps,
+                })
 
                 ate_list.append(ate)
                 rpe_trans_list.append(rpe_trans)
@@ -472,9 +482,11 @@ def eval_pose_estimation_dist(args, img_path, save_dir=None, mask_path=None):
                     f.write(
                         f"{args.eval_dataset}-{seq: <16} | ATE: {ate:.5f}, RPE trans: {rpe_trans:.5f}, RPE rot: {rpe_rot:.5f}\n"
                     )
+                    
                     f.write(f"{ate:.5f}\n")
                     f.write(f"{rpe_trans:.5f}\n")
                     f.write(f"{rpe_rot:.5f}\n")
+                
 
             except Exception as e:
                 if "out of memory" in str(e):
@@ -513,13 +525,33 @@ def eval_pose_estimation_dist(args, img_path, save_dir=None, mask_path=None):
             f.write(
                 f"Average ATE: {avg_ate:.5f}, Average RPE trans: {avg_rpe_trans:.5f}, Average RPE rot: {avg_rpe_rot:.5f}\n"
             )
+            
 
     return avg_ate, avg_rpe_trans, avg_rpe_rot
 
 
 if __name__ == "__main__":
     args = get_args_parser().parse_args()
-
+    wandb.init(
+    project="LoGeR-Ablation",
+    group=args.eval_dataset,
+    name=f"{args.eval_dataset}_w{args.window_size}_ov{args.overlap_size}",
+    config={
+        "dataset": args.eval_dataset,
+        "window_size": args.window_size,
+        "overlap_size": args.overlap_size,
+        "pose_eval_stride": args.pose_eval_stride,
+        "revisit": args.revisit,
+        "freeze_state": args.freeze_state,
+        "solve_pose": args.solve_pose,
+        "num_iterations": args.num_iterations,
+        "sim3": args.sim3,
+        "sim3_mean": args.sim3_mean,
+        "se3": args.se3,
+        "pi3x": args.pi3x,
+        "pi3x_metric": args.pi3x_metric,
+        }
+    )
     args.full_seq = False
     args.no_crop = False
 
@@ -745,3 +777,5 @@ if __name__ == "__main__":
         )
 
     eval_pose_estimation(args, save_dir=args.output_dir)
+    wandb.finish
+
