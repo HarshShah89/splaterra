@@ -447,7 +447,7 @@ def main():
     # --- wandb init (after seq_name is resolved, so run_name can default to it) ---
     if args.wandb:
         wandb.init(
-            project=args.wandb_project,
+            project=args.wandb_project
             group=args.exp_name,
             name=args.run_name or args.seq_name,
             config={

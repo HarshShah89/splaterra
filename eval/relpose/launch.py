@@ -533,7 +533,7 @@ def eval_pose_estimation_dist(args, img_path, save_dir=None, mask_path=None):
 if __name__ == "__main__":
     args = get_args_parser().parse_args()
     wandb.init(
-    project="LoGeR-Ablation",
+    project="LoGeR-Ablations",
     group=args.eval_dataset,
     name=f"{args.eval_dataset}_w{args.window_size}_ov{args.overlap_size}",
     config={
@@ -777,4 +777,4 @@ if __name__ == "__main__":
         )
 
     eval_pose_estimation(args, save_dir=args.output_dir)
-    wandb.finish
+    wandb.finish()

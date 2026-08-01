@@ -1,0 +1,19 @@
+Traceback (most recent call last):
+  File "/home/junior/splaterra/train.py", line 55, in <module>
+    points, point_colors, train_cameras, test_cameras = load_colmap_scene(
+  File "/home/junior/splaterra/tinysplat/colmap_loader.py", line 328, in load_colmap_scene
+    image_tensor = image_tensor.to(device)
+RuntimeError: CUDA error: out of memory
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Traceback (most recent call last):
+  File "/home/junior/splaterra/train.py", line 55, in <module>
+    points, point_colors, train_cameras, test_cameras = load_colmap_scene(
+  File "/home/junior/splaterra/tinysplat/colmap_loader.py", line 328, in load_colmap_scene
+    image_tensor = image_tensor.to(device)
+RuntimeError: CUDA error: out of memory
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.

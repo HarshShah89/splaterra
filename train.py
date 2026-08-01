@@ -2,10 +2,10 @@ import torch
 import gsplat
 import os
 os.makedirs("checkpoints", exist_ok=True)
-
+ 
 import torch.nn.functional as L
 import wandb
-
+ 
 from tinysplat import Scene, GaussianModel
 from tinysplat.renderer import render
 from tinysplat.losses import ssim, psnr
@@ -13,12 +13,12 @@ testing_iterations = [7000, 15000, 30000]
 from tinysplat.params import OptimizationParams, PipelineParams, ModelParams
 from tinysplat.utils import get_expon_lr_func
 from tinysplat.colmap_loader import load_colmap_scene
-
-
+ 
+ 
 pipe = PipelineParams()
 opt = OptimizationParams()
 dataset = ModelParams()
-dataset.source_path = "/home/junior/splaterra/splaterra/tinysplat"
+dataset.source_path = "/home/junior/splaterra/tinysplat"
 wandb.init(
     project="3dgs-training",
     name=os.path.basename(dataset.source_path.rstrip("/")),
@@ -45,25 +45,24 @@ wandb.init(
 )
 dataset.images = "input"
 checkpoint_path = None
-
-
+ 
+ 
 # --- Load COLMAP scene ---
-
-dataset.eval = True   # add this near your other dataset.* settings
-
+ 
+dataset.eval = True
+ 
 points, point_colors, train_cameras, test_cameras = load_colmap_scene(
     dataset_path=dataset.source_path,
-
     images_dir=dataset.images,
     sparse_subdir="sparse/0",
     device="cuda",
     eval=dataset.eval,
 )
-
+ 
 scene = Scene(train_cameras=train_cameras, test_cameras=test_cameras)
-
+ 
 gaussians = GaussianModel(sh_degree=dataset.sh_degree)
-
+ 
 if checkpoint_path is None:
     gaussians.create_from_pcd(
         points,
@@ -71,81 +70,73 @@ if checkpoint_path is None:
         device="cuda"
     )
     first_iteration = 1
-
+ 
 else:
     checkpoint = torch.load(
         checkpoint_path,
         map_location="cpu"
     )
-
+ 
     gaussians.restore(
         checkpoint["gaussians"],
         device="cuda"
     )
-
+ 
     first_iteration = checkpoint["iteration"] + 1
-
+ 
 # Create the optimizer exactly once
-
+ 
 device = gaussians.xyz.device
-
+ 
 gaussians.training_setup(
     opt,
     spatial_lr_scale=scene.cameras_extent,
     camera_names=[c.image_name for c in train_cameras],
     device=device,
 )
-
+ 
 optimizer = gaussians.optimizer
-
+ 
 if checkpoint_path is not None:
     optimizer.load_state_dict(checkpoint["optimizer"])
-
+ 
 viewpoint_stack = scene.getTrainCameras().copy()
 viewpoint_indices = list(range(len(viewpoint_stack)))
-
+ 
 background = torch.tensor(
     [1.0, 1.0, 1.0] if dataset.white_background else [0.0, 0.0, 0.0],
     dtype=torch.float32,
     device=device
 )
-
+ 
 depth_l1_weight = get_expon_lr_func(opt.depth_l1_weight_init, opt.depth_l1_weight_final, max_steps=opt.iterations)
-
-
-
-for iteration in range(first_iteration,opt.iterations+1):
-
-
+ 
+ 
+for iteration in range(first_iteration, opt.iterations + 1):
+ 
     gaussians.update_learning_rate(iteration)
-
+ 
     if iteration % 1000 == 0:
-            gaussians.oneupSHdegree()
-
-    # Pick a Random camera
-
+        gaussians.oneupSHdegree()
+ 
+    # Pick a random camera
     if not viewpoint_stack:
         viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_indices = list(range(len(viewpoint_stack)))
-
-
+ 
     rand_idx = torch.randint(0, len(viewpoint_indices), (1,)).item()
-
     viewpoint_cam = viewpoint_stack.pop(rand_idx)
-    vind = viewpoint_indices.pop(rand_idx)
-
-    # Render 
-
-    
-
+    viewpoint_indices.pop(rand_idx)  # FIX #6: dropped unused 'vind' assign, just pop to keep lists in sync
+ 
+    # Render
     if opt.random_background:
         bg = torch.rand(3, dtype=torch.float32, device=device)
     else:
         bg = background
-
-
-    render_pkg = render(viewpoint_camera=viewpoint_cam,pc=gaussians,pipe=pipe,bg_color=bg,use_trained_exp= False)
-    render_pkg = render(viewpoint_camera=viewpoint_cam,pc=gaussians,pipe=pipe,bg_color=bg,use_trained_exp= True)
+ 
+    
+    render_pkg = render(viewpoint_camera=viewpoint_cam, pc=gaussians, pipe=pipe, bg_color=bg, use_trained_exp=True)
+ 
     if iteration % 500 == 0:
         wandb.log(
             {
@@ -154,49 +145,50 @@ for iteration in range(first_iteration,opt.iterations+1):
             },
             step=iteration,
         )
-
-
+ 
     # Loss Calculation
-
-    # Loss Calculation
-
     image = render_pkg["render"]
-
     gt_image = viewpoint_cam.original_image
     Ll1 = L.l1_loss(image, gt_image)
     ssim_value = ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
     loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
-
+ 
     # Depth regularization
-    depth_loss=0
-
+    depth_loss = 0
+ 
     # Add depth supervision only if the current camera has reliable depth
     if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
-
-    # Predicted inverse depth map
+ 
         pred_depth = render_pkg["depth"]
-
-        pred_invdepth = 1.0 / (pred_depth + 1e-6)
-
-        mono_invdepth = viewpoint_cam.invdepthmap
         depth_mask = viewpoint_cam.depth_mask
-
+        mono_invdepth = viewpoint_cam.invdepthmap
+ 
+        # FIX #8: 1.0/(pred_depth+1e-6) blows up (inf) on background/zero-depth pixels.
+        # inf * 0 (from depth_mask) = nan, poisoning the whole loss/gradient even though
+        # those pixels are supposed to be masked out. Substitute a safe denom (1.0) on
+        # masked-out pixels before dividing, so the invalid region never touches inf.
+        depth_mask_bool = depth_mask.bool()
+        safe_pred_depth = torch.where(depth_mask_bool, pred_depth, torch.ones_like(pred_depth))
+        pred_invdepth = 1.0 / (safe_pred_depth + 1e-6)
+ 
         depth_loss = torch.abs(
             (pred_invdepth - mono_invdepth) * depth_mask
         ).mean()
-
-    # Weight the depth loss
-        
+ 
         depth_l1 = depth_l1_weight(iteration) * depth_loss
         loss += depth_l1
-
-    else:
-        Ll1depth = 0
-
-   
-    loss.backward()
-    
-    
+    # FIX #6: dropped unused 'Ll1depth = 0' dead var in else branch
+ 
+    # single guard var, computed once, reused below for backward() and step()
+    # instead of checking `iteration < opt.iterations` twice
+    apply_grad_step = iteration < opt.iterations
+ 
+    # FIX #5: backward() must stay positioned BEFORE the densify block (below) —
+    # add_densification_stats() needs viewspace_points.grad, which only exists
+    # after backward() runs. Don't move backward()/step() adjacent to each other.
+    if apply_grad_step:
+        loss.backward()
+ 
     # --- wandb logging ---
     if iteration % 10 == 0:
         num_gaussians = gaussians.xyz.shape[0]
@@ -211,12 +203,8 @@ for iteration in range(first_iteration,opt.iterations+1):
         if isinstance(depth_loss, torch.Tensor):
             log_dict["train/depth_loss"] = depth_loss.item()
         wandb.log(log_dict, step=iteration)
-    
-
-    #  Densification 
-
-# Perform densification only until the specified iteration
-    with torch.no_grad():
+ 
+   
         if iteration < opt.densify_until_iter:
             visible = render_pkg["visibility_filter"]
             gaussians.max_radii2D[visible] = torch.maximum(
@@ -241,44 +229,41 @@ for iteration in range(first_iteration,opt.iterations+1):
                     },
                     step=iteration,
                 )
-
-    # Reset opacity periodically
-    if (
-        iteration >= opt.opacity_reset_interval
-        and iteration % opt.opacity_reset_interval == 0
-        ):
-
-            gaussians.reset_opacity()
-
+ 
+            # Reset opacity periodically (now correctly scoped inside densify window)
+            if (
+                iteration >= opt.opacity_reset_interval
+                and iteration % opt.opacity_reset_interval == 0
+            ):
+                gaussians.reset_opacity()
+ 
     # Optimization
-    if iteration < opt.iterations:
-
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            if gaussians.exposure_optimizer is not None:
-                gaussians.exposure_optimizer.step()
-                gaussians.exposure_optimizer.zero_grad(set_to_none=True)
-
-    # Checkpoints 
-
-    if iteration % 100 == 0:
-
-            print(f"\n[ITER {iteration}] Saving checkpoint")
-            
-
-            torch.save({
+    if apply_grad_step:
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        if gaussians.exposure_optimizer is not None:
+            gaussians.exposure_optimizer.step()
+            gaussians.exposure_optimizer.zero_grad(set_to_none=True)
+ 
+    # Checkpoints
+    if iteration % 6000 == 0:
+        print(f"\n[ITER {iteration}] Saving checkpoint")
+ 
+        torch.save({
             "iteration": iteration,
             "gaussians": gaussians.capture(),
             "optimizer": optimizer.state_dict(),
-        }
+        },
         f"checkpoints/checkpoint_{iteration}.pth"
         )
+ 
     if iteration in testing_iterations and len(scene.getTestCameras()) > 0:
         l1_test = 0.0
         psnr_test = 0.0
         test_cams = scene.getTestCameras()
         with torch.no_grad():
             for test_cam in test_cams:
+                
                 render_pkg_test = render(
                     viewpoint_camera=test_cam, pc=gaussians, pipe=pipe,
                     bg_color=background, use_trained_exp=False,
@@ -287,9 +272,9 @@ for iteration in range(first_iteration,opt.iterations+1):
                 gt_test = torch.clamp(test_cam.original_image, 0.0, 1.0)
                 l1_test += L.l1_loss(image_test, gt_test).item()
                 psnr_test += psnr(image_test, gt_test).mean().item()
-
+ 
         l1_test /= len(test_cams)
         psnr_test /= len(test_cams)
         print(f"\n[ITER {iteration}] Eval — L1 {l1_test:.4f}  PSNR {psnr_test:.2f}")
+ 
 wandb.finish()
-

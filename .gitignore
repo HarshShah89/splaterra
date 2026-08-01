@@ -2,3 +2,8 @@ __pycache__/
 results*/
 convert_ckpt_to_params.py
 *.pt
+tinysplat/checkpoints
+tinysplat/input
+tinysplat/output
+tinysplat/checkpoint_ply
+wandb
