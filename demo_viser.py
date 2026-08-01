@@ -15,7 +15,7 @@ from PIL import Image
 from torchvision import transforms
 from natsort import natsorted
 from typing import List, Optional
-
+from loger.utils.wandb_hooks import TTTSWACollector
 from pathlib import Path
 from loger.utils.rotation import mat_to_quat
 from loger.utils.geometry import depth_edge
@@ -447,7 +447,7 @@ def main():
     # --- wandb init (after seq_name is resolved, so run_name can default to it) ---
     if args.wandb:
         wandb.init(
-            project=args.wandb_project
+            project=args.wandb_project,
             group=args.exp_name,
             name=args.run_name or args.seq_name,
             config={
@@ -464,8 +464,8 @@ def main():
                 "detach": args.detach,
                 "adaptive_features": args.adaptive_features,
                 "adaptive_metric_scaling": args.metric_scaling,
-            }
-        )
+                }
+            )
 
     if args.load:
         saved_predictions_path = args.load
@@ -590,6 +590,8 @@ def main():
                 'reset_every': args.reset_every if args.reset_every is not None else 0
             })
 
+        collector = TTTSWACollector(model) if args.wandb else None
+
         # Warmup run to trigger torch.compile (first run has compilation overhead)
         if args.warmup or args.benchmark:
             print("Running warmup inference (to trigger torch.compile)...")
@@ -676,12 +678,22 @@ def main():
                 "fps": fps,
                 "ms_per_frame": ms_per_frame,
                 "peak_mem_mb": peak_mem_mb,
+                
             })
+            if args.wandb and collector is not None:
+                collector.log_to_wandb()
+            if collector is not None:
+                collector.remove()
 
         # Post-process predictions
         # Using permute to get (B, S, H, W, C) for easier numpy conversion later
         raw_model_predictions['images'] = images_tensor[None].permute(0, 1, 3, 4, 2)
         raw_model_predictions['conf'] = torch.sigmoid(raw_model_predictions['conf'])
+        conf_np = raw_model_predictions['conf'].detach().cpu()
+    mean_conf = conf_np.mean().item()
+    num_valid_points = (conf_np > args.conf_threshold / 100.0).sum().item()
+    if args.wandb:
+        wandb.log({"mean_conf": mean_conf, "num_valid_points": num_valid_points})
         # Edge mask on depth can be noisy, optional
         # edge = depth_edge(raw_model_predictions['local_points'][..., 2], rtol=0.03)
         # raw_model_predictions['conf'][edge] = 0.0

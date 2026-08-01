@@ -7,3 +7,4 @@ tinysplat/input
 tinysplat/output
 tinysplat/checkpoint_ply
 wandb
+wandb_logs
